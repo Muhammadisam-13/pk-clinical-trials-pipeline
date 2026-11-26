@@ -47,3 +47,16 @@ Sample studies (saved in `data/raw/`, gitignored):
   (`centralContacts`, `overallOfficials`, `locations[].contacts`) have their name/phone/email
   replaced with `"REDACTED"`. The structure stays the same, but no personal data is stored.
 - The contact email for the User-Agent comes from `CTGOV_CONTACT` in `.env` (gitignored). See `.env.example`.
+
+## robots.txt and rate limits
+`https://clinicaltrials.gov/robots.txt` (checked 2026-11-26) contains `User-agent: *`, `Disallow: /api/` and `Crawl-delay: 1`.
+
+robots.txt disallows /api/ for generic crawlers. This spider uses NLM's documented public API v2 and therefore
+overrides robots.txt **for this spider only** (`custom_settings = {"ROBOTSTXT_OBEY": False}` in
+`spiders/studies.py`). The global `ROBOTSTXT_OBEY` stays `True`. In exchange, the spider is deliberately gentle:
+- `DOWNLOAD_DELAY = 1` (matches their `Crawl-delay: 1`), one request at a time, AutoThrottle on.
+- An identified `USER_AGENT` with a contact address.
+- `pageSize=1000` (the API maximum), so the full crawl is ~7 requests instead of ~33.
+- HTTP 429 (rate limited): exponential backoff (10, 20, 40, 80, 160 s, or the server's `Retry-After`), max 5 retries.
+  NLM doesn't publish a formal rate limit; unofficial guides mention roughly 50 requests/minute per IP, and we stay far below that.
+- While debugging, use `-s CLOSESPIDER_PAGECOUNT=2` instead of repeating the full crawl.
