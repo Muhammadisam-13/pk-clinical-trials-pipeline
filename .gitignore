@@ -1,0 +1,19 @@
+# virtual environment
+.venv/
+
+# local data: sqlite db and raw dumps
+data/
+*.db
+*.sqlite
+
+# python cache
+__pycache__/
+*.pyc
+
+# scrapy cache
+.scrapy/
+
+# editor / os
+.vscode/
+.idea/
+.DS_Store

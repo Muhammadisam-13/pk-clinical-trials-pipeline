@@ -1,0 +1,2 @@
+scrapy>=2.11
+pydantic>=2.0
