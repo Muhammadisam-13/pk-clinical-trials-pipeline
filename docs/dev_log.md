@@ -48,3 +48,25 @@ Written while building, so I can explain every decision. Newest step at the bott
 - **Why exponential backoff?** If the server is overloaded, retrying quickly makes it worse. Doubling the wait gives it time to recover. `Retry-After` wins when the server tells us exactly how long to wait.
 - **Why `dont_filter=True` on the retry?** Scrapy drops requests for URLs it has already seen (its duplicate filter). A retry has the same URL, so it must skip that filter.
 - **How do you test without hammering the server?** `-s CLOSESPIDER_PAGECOUNT=2` for real runs; the 429 path was tested offline by passing a fake `TextResponse(status=429)` to `parse()`.
+
+---
+
+## Step 3: Schema
+
+### What we did
+- `sql/schema.sql`: 4 tables (`studies`, `conditions`, `locations`, `rejected`) and 4 indexes, all `IF NOT EXISTS`.
+- `ctgov_pk/db.py`: `connect()` opens SQLite with foreign keys on; `init_db()` runs the schema file.
+- Tested: running `init_db()` twice raises no error; an omitted phase defaults to `NOT_REPORTED`; inserting a condition for a study that doesn't exist fails with `FOREIGN KEY constraint failed`.
+
+### Problems and fixes
+| Problem | Cause | Fix |
+|---|---|---|
+| SQLite doesn't enforce `REFERENCES` by default | Backwards-compatibility default in SQLite | `PRAGMA foreign_keys = ON` on every connection (in `connect()`) |
+| `locations` has no primary key, so re-running the crawl could duplicate sites | A site has no natural unique ID (facility names can repeat or be missing) | Handled in the store pipeline: delete a study's child rows, then re-insert, in one transaction (step 4) |
+
+### Interview talking points
+- **Why separate tables for conditions and locations?** One study has many of each (one-to-many). Child tables with `nct_id` let you index and query them ("studies in Lahore") instead of searching inside a comma-separated text column. This is normalization (first normal form: one value per cell).
+- **Why `PRIMARY KEY (nct_id, condition)`?** The same condition can't be listed twice for one study, so the database itself rejects duplicates.
+- **Why these 4 indexes?** Each one matches an analysis query: filtering/grouping by status, by start year, by condition, and by city. In step 5 I prove each one is used with `EXPLAIN QUERY PLAN`.
+- **Why store dates as TEXT?** SQLite has no date type. ISO `YYYY-MM-DD` text sorts and compares correctly, and `substr(start_date, 1, 4)` gives the year.
+- **Why `start_date_partial`?** Padding `2013-06` to `2013-06-01` makes the date usable, but invents a day. The flag keeps that honest, so analyses can exclude padded dates if precision matters.
