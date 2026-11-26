@@ -141,3 +141,25 @@ Written while building, so I can explain every decision. Newest step at the bott
 - **What is `from_crawler`?** Scrapy's hook for building a component. It hands us `crawler.settings` (for `SQLITE_PATH`) and `crawler.stats` (for counters), instead of the pipeline using globals.
 - **What do the stats prove?** At the end: `api/studies_seen` = `validate/accepted` + `validate/rejected`, and after the dedupe step, accepted = stored + duplicates. Every record is accounted for.
 - **Why does Validate check `enrollment >= 0` and not more?** Only rules we can justify go in. A study with 0 participants exists (withdrawn studies), so `>= 0`, not `> 0`.
+
+---
+
+## Step 4.3: DedupePipeline
+
+### What we did
+- `DedupePipeline` keeps a `set` of `nct_id`s seen in this run. A repeat increments `dedupe/duplicates` and raises
+  `DropItem`; a new ID increments `dedupe/unique` and passes on.
+- Unit test with 5 IDs (2 repeats): 3 passed, 2 dropped, and the stats matched.
+- Real 2-page crawl: 2000 accepted, 2000 unique, 0 duplicates.
+
+### Problems and fixes
+| Problem | Cause | Fix |
+|---|---|---|
+| Dedupe only remembers IDs for one run; a second run starts with an empty set | The set lives in memory | By design. Two layers: the set handles repeats *within* a run, and `INSERT OR REPLACE` / upsert in SqlitePipeline handles *re-runs* (step 4.4) |
+| 0 duplicates on 2 real pages: is the step needed? | The API's `pageToken` pagination is stable for a quick crawl | Keep it: it's cheap, and pagination can return repeats if records change mid-crawl or a page is retried. The full run's stats will show the real count |
+
+### Interview talking points
+- **Why dedupe after validate, not before?** Invalid records are already logged and gone, so the set only tracks IDs that will actually be stored. Either order works; this one keeps the `seen_ids` set to good records.
+- **Why a set?** Membership checks are O(1) on average (hash table). About 6.5k short strings is trivial memory.
+- **Why both in-memory dedupe *and* a DB upsert?** Defense in depth: the set avoids wasted DB writes and gives a clean duplicate count in the stats; the primary key and upsert guarantee correctness even across runs or if the set logic had a bug.
+- **Accounting:** `api/studies_seen` = `validate/rejected` + `dedupe/duplicates` + `dedupe/unique`, and `dedupe/unique` should equal the rows written to `studies`.

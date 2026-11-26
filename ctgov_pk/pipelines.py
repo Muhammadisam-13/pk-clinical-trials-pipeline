@@ -192,3 +192,31 @@ class ValidatePipeline:
 
         self.stats.inc_value("validate/accepted")
         return item
+
+
+# ---------------------------------------------------------------------------
+# Dedupe
+# ---------------------------------------------------------------------------
+
+class DedupePipeline:
+    """Drop a study if the same nct_id already passed through in this run.
+
+    This only covers one run. Re-runs are made safe by the upsert in SqlitePipeline.
+    """
+
+    def __init__(self, stats):
+        self.stats = stats
+        self.seen_ids = set()  # set lookup is O(1), fine for ~6.5k ids
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls(crawler.stats)
+
+    def process_item(self, item, spider=None):
+        nct_id = item["nct_id"]
+        if nct_id in self.seen_ids:
+            self.stats.inc_value("dedupe/duplicates")
+            raise DropItem(f"duplicate {nct_id} in this run")
+        self.seen_ids.add(nct_id)
+        self.stats.inc_value("dedupe/unique")
+        return item
