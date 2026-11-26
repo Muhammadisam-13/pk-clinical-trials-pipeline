@@ -224,3 +224,35 @@ Written while building, so I can explain every decision. Newest step at the bott
 - **How do you know you got everything?** Three independent numbers agree: the API's `totalCount` (6490), the studies the spider saw (6490), and rows in the DB (6490). And `nextPageToken` was absent on the last page.
 - **How do you prove an index is used?** `EXPLAIN QUERY PLAN` shows `SEARCH ... USING INDEX` (a direct lookup) instead of `SCAN` (reading every row). "Covering index" means the index alone answers the query without touching the table.
 - **What did verification catch?** A source-data error (a Polish site labelled with state "Pakistan"), found by a sanity query for studies with no Pakistan location. Checks like this find problems that row counts alone never would.
+
+---
+
+## Step 6: Analysis queries and README
+
+### What we did
+- `sql/analysis.sql`: status, start year (raw and grouped), top 10 cities, top 10 sponsors, top-sponsor share,
+  phase breakdown, % NOT_REPORTED, % partial dates, rejections, study type, totals.
+- `sql/run_analysis.py` runs every query in the file and prints the results, so every README number is reproducible.
+- Wrote the README entirely from those results.
+
+### Problems and fixes
+| Problem | Cause | Fix |
+|---|---|---|
+| `UnicodeEncodeError` when *printing* results | Windows console uses cp1252; a city name contained `ā` | `sys.stdout.reconfigure(encoding="utf-8")` in `run_analysis.py` (same root cause as the step 1 file-reading error, this time on output) |
+| **Faisalabad appeared twice in the top 10** (145 + 151) | The registry spells 20 cities both with and without diacritics (`Faisalābad`, `Abbottābād`, `Sāhīwāl` ...) | `strip_accents()` in NormalizePipeline (city only): Unicode NFKD splits `ā` into `a` + a combining mark, and we drop the mark. Then a full re-run. Result: 0 accented city names, 181 distinct cities, Faisalabad = 294 |
+| Faisalabad became 294, not 145 + 151 = 296 | 2 studies listed the city under both spellings | Correct behaviour: `COUNT(DISTINCT nct_id)` counts each study once. Good evidence the merge is right |
+| "8.9% phase not reported" looked like a data gap | Cross-tab showed all 580 `NOT_REPORTED` are observational studies (0 of 5910 interventional) | Reported as "phase doesn't apply to observational studies", not as missing data |
+| A top-10 sponsor is a private individual | Researchers can register as sponsor-investigator | Kept in the DB (public registry data); shown as "(individual investigator)" in the README |
+| Temptation to compute "before 2017" totals by hand | README needed a compact year table | Added query 2b to `analysis.sql` instead, so no number is hand-calculated |
+| An unverified claim ("201 spellings") crept into the README draft | I'd only inspected 12 of the 20 variant groups | Replaced with what was measured (181 distinct cities, 0 non-ASCII) |
+
+### Interview talking points
+- **How do you make sure README numbers are true?** Every number comes from a query in `sql/analysis.sql`; `run_analysis.py` reproduces them. Even derived numbers (grouped years, the top-sponsor share) got their own query instead of mental math.
+- **What did analysis reveal that ingestion didn't?** The accent split (only visible when you GROUP BY city) and the phase/study-type relationship. Looking at results critically is part of the pipeline, not an afterthought.
+- **Why fix accents in the pipeline rather than in the query?** SQLite has no built-in accent folding, and fixing it at ingestion means every query, now and later, gets clean city names.
+- **Headline facts:**
+  - 6490 studies.
+  - Riphah International University leads 34.2% of them.
+  - Lahore has sites in 2356 studies.
+  - Registrations climbed from 101 (2017) to 1172 (2025).
+  - 76.3% of studies have phase `NA` (non-drug studies).
