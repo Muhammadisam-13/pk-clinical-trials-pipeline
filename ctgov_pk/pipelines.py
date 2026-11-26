@@ -8,6 +8,7 @@ Each item from the spider is {"study": <raw study dict from the API>}.
 import copy
 import json
 import re
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -28,6 +29,17 @@ def clean_text(value):
         return None
     value = re.sub(r"\s+", " ", str(value)).strip()
     return value or None
+
+
+def strip_accents(value):
+    """'Faisalābad' -> 'Faisalabad'. The registry spells ~20 Pakistani cities both ways.
+
+    NFKD splits 'ā' into 'a' + a combining macron; we then drop the combining marks.
+    """
+    if value is None:
+        return None
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
 def normalize_date(raw):
@@ -97,7 +109,7 @@ class NormalizePipeline:
             if clean_text(loc.get("country")) == "Pakistan":
                 locations.append({
                     "facility": clean_text(loc.get("facility")),
-                    "city": clean_text(loc.get("city")),
+                    "city": strip_accents(clean_text(loc.get("city"))),
                     "country": "Pakistan",
                 })
 
