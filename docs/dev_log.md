@@ -163,3 +163,36 @@ Written while building, so I can explain every decision. Newest step at the bott
 - **Why a set?** Membership checks are O(1) on average (hash table). About 6.5k short strings is trivial memory.
 - **Why both in-memory dedupe *and* a DB upsert?** Defense in depth: the set avoids wasted DB writes and gives a clean duplicate count in the stats; the primary key and upsert guarantee correctness even across runs or if the set logic had a bug.
 - **Accounting:** `api/studies_seen` = `validate/rejected` + `dedupe/duplicates` + `dedupe/unique`, and `dedupe/unique` should equal the rows written to `studies`.
+
+---
+
+## Step 4.4: SqlitePipeline
+
+### What we did
+- `SqlitePipeline` opens one connection in `open_spider`. For each study it runs **one transaction** (`with self.conn:`):
+  1. upsert the `studies` row (`INSERT ... ON CONFLICT(nct_id) DO UPDATE`)
+  2. delete that study's `conditions` and `locations`
+  3. insert the current ones with `executemany`
+
+  It commits and closes in `close_spider`, and counts `sqlite/stored`.
+- It returns a tiny `{"nct_id": ...}` item, so Scrapy's logs and feeds don't carry the whole record.
+- Tests:
+  - **2-page crawl twice on a fresh DB:** identical counts both times
+    (studies 2000, conditions 3099, locations 2317, rejected 0), so it is idempotent.
+  - **Rollback:** an item whose 2nd condition is `None` fails on `NOT NULL`. Afterwards 0 study rows and
+    0 condition rows remain, so the half-written study was fully rolled back.
+
+### Problems and fixes
+| Problem | Cause | Fix |
+|---|---|---|
+| CLAUDE.md suggested `INSERT OR REPLACE`, but it would break on re-runs | In SQLite, `REPLACE` *deletes* the conflicting row and inserts a new one. With `PRAGMA foreign_keys = ON`, deleting a study that still has conditions/locations is a foreign-key violation | Use a true upsert: `ON CONFLICT(nct_id) DO UPDATE SET col = excluded.col`. It updates in place and never deletes the parent |
+| `locations` has no primary key, so re-inserting would duplicate sites | Sites have no reliable unique ID | Delete-then-insert a study's child rows inside the same transaction. A re-run replaces them instead of appending |
+| A crash between the parent insert and the child inserts could leave a half-written study | Several statements per study | `with self.conn:` makes them one transaction: commit on success, rollback on any exception (verified by the rollback test) |
+
+### Interview talking points
+- **What does "idempotent" mean here?** Running the crawl once or ten times leaves the database in the same state. It's proven by running twice and comparing row counts in every table.
+- **What is `excluded`?** In an upsert, `excluded.col` means "the value from the row I tried to insert". So `title = excluded.title` overwrites the old title with the freshly pulled one.
+- **Why update instead of skipping existing studies?** Registry records change (status goes RECRUITING → COMPLETED). Updating keeps the DB current; `pulled_at` shows when each row was last refreshed.
+- **Why one connection for the whole crawl?** Opening a connection per item is slow. `open_spider`/`close_spider` are Scrapy's lifecycle hooks for exactly this kind of setup and teardown.
+- **Why `?` placeholders?** Parameterized queries: values never get pasted into SQL text, which prevents SQL injection and quoting bugs (titles contain apostrophes).
+- **Why does the pipeline return only `{"nct_id": ...}`?** The final pipeline's return value is what Scrapy logs/exports. The full record (including raw JSON) would bloat logs for no benefit.

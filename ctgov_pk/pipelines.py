@@ -220,3 +220,61 @@ class DedupePipeline:
         self.seen_ids.add(nct_id)
         self.stats.inc_value("dedupe/unique")
         return item
+
+
+# ---------------------------------------------------------------------------
+# Store
+# ---------------------------------------------------------------------------
+
+STUDY_COLUMNS = ["nct_id", "title", "status", "study_type", "phase", "start_date",
+                 "start_date_partial", "enrollment", "sponsor", "pulled_at"]
+
+# Upsert: insert a new study, or update the existing row in place if nct_id is already there.
+# (INSERT OR REPLACE would delete the old row first, which the foreign keys from child tables forbid.)
+UPSERT_STUDY = f"""
+INSERT INTO studies ({", ".join(STUDY_COLUMNS)})
+VALUES ({", ".join("?" for _ in STUDY_COLUMNS)})
+ON CONFLICT(nct_id) DO UPDATE SET
+  {", ".join(f"{c} = excluded.{c}" for c in STUDY_COLUMNS if c != "nct_id")}
+"""
+
+
+class SqlitePipeline:
+    """Write each accepted study (parent row + child rows) to SQLite in one transaction."""
+
+    def __init__(self, db_path, stats):
+        self.db_path = db_path
+        self.stats = stats
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls(crawler.settings.get("SQLITE_PATH"), crawler.stats)
+
+    def open_spider(self, spider=None):
+        self.conn = connect(self.db_path)
+        init_db(self.conn)
+
+    def close_spider(self, spider=None):
+        self.conn.commit()
+        self.conn.close()
+
+    def process_item(self, item, spider=None):
+        nct_id = item["nct_id"]
+        # `with conn:` commits if the block succeeds and rolls back if anything raises,
+        # so a study is never stored with only half of its child rows.
+        with self.conn:
+            self.conn.execute(UPSERT_STUDY, [item[c] for c in STUDY_COLUMNS])
+
+            # Children: replace them wholesale so re-runs never duplicate them.
+            self.conn.execute("DELETE FROM conditions WHERE nct_id = ?", (nct_id,))
+            self.conn.execute("DELETE FROM locations WHERE nct_id = ?", (nct_id,))
+            self.conn.executemany(
+                "INSERT INTO conditions (nct_id, condition) VALUES (?, ?)",
+                [(nct_id, c) for c in item["conditions"]],
+            )
+            self.conn.executemany(
+                "INSERT INTO locations (nct_id, facility, city, country) VALUES (?, ?, ?, ?)",
+                [(nct_id, loc["facility"], loc["city"], loc["country"]) for loc in item["locations"]],
+            )
+        self.stats.inc_value("sqlite/stored")
+        return {"nct_id": nct_id}  # keep Scrapy's log/feeds small; the data is in the DB now

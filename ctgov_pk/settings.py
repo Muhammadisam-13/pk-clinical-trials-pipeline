@@ -42,4 +42,5 @@ ITEM_PIPELINES = {
     "ctgov_pk.pipelines.NormalizePipeline": 100,
     "ctgov_pk.pipelines.ValidatePipeline": 200,
     "ctgov_pk.pipelines.DedupePipeline": 300,
+    "ctgov_pk.pipelines.SqlitePipeline": 400,
 }
