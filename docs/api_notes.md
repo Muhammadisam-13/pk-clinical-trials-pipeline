@@ -40,3 +40,10 @@ Sample studies (saved in `data/raw/`, gitignored):
 - **enrollment count missing** in 2 of 1000.
 - **Non-Pakistan locations**: 45 of 1000 studies are multinational, with sites in other countries too.
 - **Personal data is present in locations**: `locations[].contacts[]` holds names, phones and emails. We only copy `facility`, `city` and `country`, and we never store the contacts.
+
+## Decisions
+- `phases = ["NA"]` is stored as `NA` (not applicable). Only a missing phase becomes `NOT_REPORTED`.
+- Before a study's `raw_json` goes into the `rejected` table, the person fields in `contactsLocationsModule`
+  (`centralContacts`, `overallOfficials`, `locations[].contacts`) have their name/phone/email
+  replaced with `"REDACTED"`. The structure stays the same, but no personal data is stored.
+- The contact email for the User-Agent comes from `CTGOV_CONTACT` in `.env` (gitignored). See `.env.example`.
