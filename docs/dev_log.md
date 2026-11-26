@@ -196,3 +196,31 @@ Written while building, so I can explain every decision. Newest step at the bott
 - **Why one connection for the whole crawl?** Opening a connection per item is slow. `open_spider`/`close_spider` are Scrapy's lifecycle hooks for exactly this kind of setup and teardown.
 - **Why `?` placeholders?** Parameterized queries: values never get pasted into SQL text, which prevents SQL injection and quoting bugs (titles contain apostrophes).
 - **Why does the pipeline return only `{"nct_id": ...}`?** The final pipeline's return value is what Scrapy logs/exports. The full record (including raw JSON) would bloat logs for no benefit.
+
+---
+
+## Step 5: Full run and verification (2026-11-26)
+
+### Results (all from Scrapy stats and SQL actually run)
+| Check | Result |
+|---|---|
+| Full run reaches the last page | 7 pages, `api/reached_last_page: True`, `finish_reason: finished`, 7 × HTTP 200, 0 errors, ~223 s |
+| DB count vs API `totalCount` | `studies` = **6490**, API `totalCount` = **6490**: exact match |
+| seen = rejected + duplicates + stored | **6490 = 0 + 0 + 6490** (`api/studies_seen`, `validate/rejected`, `dedupe/duplicates`, `sqlite/stored`) |
+| Idempotency (2nd full run on the same DB) | before and after: studies 6490, conditions 9961, locations 7516, rejected 0, unchanged |
+| `EXPLAIN QUERY PLAN`, one query per index | status, start_date and city: `SEARCH ... USING COVERING INDEX`; condition: `SEARCH ... USING INDEX idx_conditions_condition` |
+| Integrity | 0 orphan child rows; 0 studies without conditions; 0 locations with NULL city |
+| Repo hygiene | `data/` (DB, logs, raw dumps), `.env`, `.venv/` are ignored (`git check-ignore`); no emails or phone numbers in tracked files (`git grep`) |
+
+### Problems and findings
+| Finding | Cause | Handling |
+|---|---|---|
+| 1 study (NCT06980805, a lupus trial) has **no Pakistan site** in our DB | Registry data-entry error: a Polish site has `city: Rzeszów, state: "Pakistan", country: Poland`. The API's `query.locn` matches the state field too, so the study was returned | Our country filter correctly excluded that site from `locations`. The study row is kept (it's what the API returns for the query, and keeping it makes the count match `totalCount`) and is reported as a known false positive |
+| 0 rejections and 0 duplicates on the full data | The registry validates submissions; `pageToken` pagination was stable during the crawl | Reported honestly. The rules are proven by the unit tests in steps 4.2 and 4.3 |
+| `GROUP BY lower(condition)` can't *search* the condition index | An index on `condition` doesn't cover the expression `lower(condition)` | It still scans the covering index (no table reads), which is fine at ~10k rows. An expression index on `lower(condition)` would be the fix if needed |
+| A full run takes ~3.7 min for 7 requests | `DOWNLOAD_DELAY = 1` plus AutoThrottle backing off on large (~1000-study) responses, and one SQLite commit per study | Acceptable and deliberately polite. Batching commits would be the first optimization |
+
+### Interview talking points
+- **How do you know you got everything?** Three independent numbers agree: the API's `totalCount` (6490), the studies the spider saw (6490), and rows in the DB (6490). And `nextPageToken` was absent on the last page.
+- **How do you prove an index is used?** `EXPLAIN QUERY PLAN` shows `SEARCH ... USING INDEX` (a direct lookup) instead of `SCAN` (reading every row). "Covering index" means the index alone answers the query without touching the table.
+- **What did verification catch?** A source-data error (a Polish site labelled with state "Pakistan"), found by a sanity query for studies with no Pakistan location. Checks like this find problems that row counts alone never would.
