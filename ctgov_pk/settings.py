@@ -28,7 +28,7 @@ NEWSPIDER_MODULE = "ctgov_pk.spiders"
 CONTACT = os.environ.get("CTGOV_CONTACT", "contact-not-set")
 USER_AGENT = f"ctgov-pk-pipeline/0.1 (student data project; contact: {CONTACT})"
 ROBOTSTXT_OBEY = True
-DOWNLOAD_DELAY = 0.5
+DOWNLOAD_DELAY = 1  # matches Crawl-delay: 1 in clinicaltrials.gov/robots.txt
 CONCURRENT_REQUESTS_PER_DOMAIN = 1
 AUTOTHROTTLE_ENABLED = True
 
