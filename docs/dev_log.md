@@ -70,3 +70,41 @@ Written while building, so I can explain every decision. Newest step at the bott
 - **Why these 4 indexes?** Each one matches an analysis query: filtering/grouping by status, by start year, by condition, and by city. In step 5 I prove each one is used with `EXPLAIN QUERY PLAN`.
 - **Why store dates as TEXT?** SQLite has no date type. ISO `YYYY-MM-DD` text sorts and compares correctly, and `substr(start_date, 1, 4)` gives the year.
 - **Why `start_date_partial`?** Padding `2013-06` to `2013-06-01` makes the date usable, but invents a day. The flag keeps that honest, so analyses can exclude padded dates if precision matters.
+
+---
+
+## Step 4.1: NormalizePipeline
+
+### What we did
+- `NormalizePipeline.process_item()` turns `{"study": <nested raw dict>}` into a flat dict whose keys match the
+  `studies` columns, plus `conditions` and `locations` lists for the child tables, plus a redacted `raw_json`.
+- Small helper functions (`clean_text`, `normalize_date`, `normalize_phase`, `unique_ignoring_case`, `redact_people`),
+  so each rule can be explained and tested on its own.
+- Tested on the 2 real stem-cell studies plus synthetic edge cases: missing phase, `NA`, phases out of order,
+  year-only date, garbage date, messy and case-duplicate conditions, non-Pakistan site.
+
+### Normalization rules (and why)
+| Rule | Example | Why |
+|---|---|---|
+| Pad partial dates, set `start_date_partial = 1` | `2013-06` → `2013-06-01` | Makes dates sortable/comparable; the flag records that the day was invented |
+| Unrecognized date passes through unchanged | `soon` → `soon` | Normalize cleans, Validate judges. Validate will reject it with a clear reason instead of us silently guessing |
+| Missing phase → `NOT_REPORTED`; `["NA"]` → `NA` | | Missing and not-applicable mean different things (see step 1) |
+| Several phases joined in a fixed order | `["PHASE3","PHASE2"]` → `PHASE2/PHASE3` | Same set of phases always gives the same string, so GROUP BY works |
+| Unknown future phase values kept (appended, sorted) | | Never silently lose data if the API adds a new value |
+| Whitespace stripped and collapsed | `"Spinal   Cord Injury "` → `"Spinal Cord Injury"` | Prevents "same" values counting as different |
+| Conditions deduped within a study, ignoring case; first spelling kept | `["COVID-19","Covid-19"]` → `["COVID-19"]` | Avoids near-duplicate child rows |
+| Only Pakistan locations kept; only facility/city/country | | The project is about Pakistan sites; contacts are personal data |
+| Person name/phone/email in `raw_json` → `"REDACTED"` | | `raw_json` is stored for rejected rows; no personal data may be stored |
+
+### Problems and fixes
+| Problem | Cause | Fix |
+|---|---|---|
+| CLAUDE.md asked for "consistent casing" of conditions/sponsors, but a blanket rule (e.g. Title Case) would corrupt acronyms: `HIV` → `Hiv`, `COVID-19` → `Covid-19` | Medical names mix acronyms and words | **Measured first:** in 1000 studies there were only 2 casing-variant groups in conditions (`COVID-19`/`Covid-19`, `Prediabetes`/`PreDiabetes`) and 0 in sponsors. So: keep the original text, dedupe case-insensitively within a study, and group case-insensitively in analysis queries. No re-casing |
+| Contacts appear in 3 places, not just locations | `centralContacts`, `overallOfficials` and `locations[].contacts` all hold people | `redact_people()` covers all three; checked that no `@` or phone number survives in the output |
+| Keeping redacted raw JSON for *every* item costs memory | It's only needed for rejected rows | Accepted for simplicity: ~6.5k studies is small. The store pipeline doesn't save it for accepted rows |
+
+### Interview talking points
+- **What is an item pipeline?** A class with `process_item(item, spider)`. Scrapy passes each yielded item through every enabled pipeline in order of the numbers in `ITEM_PIPELINES` (lower runs first). Returning the item passes it on; raising `DropItem` stops it.
+- **Why separate Normalize from Validate?** Single responsibility. Normalize *transforms* and never drops; Validate *judges*. That means every rejection happens in one place, with one reason format, and gets logged to the `rejected` table.
+- **Why deep-copy before redacting?** `redact_people` must not change the original dict other code may still use. `copy.deepcopy` makes it side-effect free.
+- **Why `.get(..., {})` chains everywhere?** Any module or key can be missing in real data. Chained `.get` with defaults means a missing piece becomes `None` instead of a `KeyError` crash, and Validate then decides whether `None` is acceptable.

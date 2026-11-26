@@ -36,3 +36,8 @@ AUTOTHROTTLE_ENABLED = True
 SQLITE_PATH = str(PROJECT_ROOT / "data" / "ctgov_pk.db")
 
 FEED_EXPORT_ENCODING = "utf-8"
+
+# --- Item pipelines: lower number runs first ---
+ITEM_PIPELINES = {
+    "ctgov_pk.pipelines.NormalizePipeline": 100,
+}
