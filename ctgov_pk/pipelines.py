@@ -8,7 +8,12 @@ Each item from the spider is {"study": <raw study dict from the API>}.
 import copy
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from scrapy.exceptions import DropItem
+
+from ctgov_pk.db import connect, init_db
 
 # Fixed order used when a study lists several phases, so ["PHASE3", "PHASE2"] -> "PHASE2/PHASE3".
 PHASE_ORDER = ["EARLY_PHASE1", "PHASE1", "PHASE2", "PHASE3", "PHASE4", "NA"]
@@ -111,3 +116,79 @@ class NormalizePipeline:
             "pulled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "raw_json": json.dumps(redact_people(study), ensure_ascii=False),
         }
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+EARLIEST_START = date(1990, 1, 1)
+
+
+class StudyRecord(BaseModel):
+    """What a valid, normalized study looks like. Only fields with rules are listed."""
+
+    nct_id: str = Field(pattern=r"^NCT\d{8}$")
+    title: str = Field(min_length=1)
+    enrollment: int | None = Field(default=None, ge=0)
+    start_date: str | None = None
+
+    @field_validator("start_date")
+    @classmethod
+    def start_date_in_range(cls, value):
+        if value is None:
+            return value
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"not a valid YYYY-MM-DD date: {value!r}")
+        latest = date.today() + timedelta(days=3653)  # ~10 years ahead
+        if not EARLIEST_START <= parsed <= latest:
+            raise ValueError(f"{value} is outside {EARLIEST_START} .. {latest}")
+        return value
+
+
+def short_reason(error: ValidationError):
+    """Turn pydantic's error into one readable line, e.g. 'nct_id: String should match pattern ...'."""
+    return "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in error.errors())
+
+
+class ValidatePipeline:
+    """Check each normalized study. Bad ones go to the `rejected` table, then are dropped."""
+
+    def __init__(self, db_path, stats):
+        self.db_path = db_path
+        self.stats = stats
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        # Scrapy calls this to build the pipeline; it gives us settings and the stats collector.
+        return cls(crawler.settings.get("SQLITE_PATH"), crawler.stats)
+
+    def open_spider(self, spider=None):
+        self.conn = connect(self.db_path)
+        init_db(self.conn)
+        # `rejected` describes the latest run only, so its row count matches this run's stats.
+        self.conn.execute("DELETE FROM rejected")
+        self.conn.commit()
+
+    def close_spider(self, spider=None):
+        self.conn.commit()
+        self.conn.close()
+
+    def process_item(self, item, spider=None):
+        try:
+            StudyRecord(**item)
+        except ValidationError as error:
+            reason = short_reason(error)
+            self.conn.execute(
+                "INSERT INTO rejected (nct_id, reason, raw_json, rejected_at) VALUES (?, ?, ?, ?)",
+                (item.get("nct_id"), reason, item.get("raw_json"),
+                 datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            )
+            self.conn.commit()
+            self.stats.inc_value("validate/rejected")
+            raise DropItem(f"{item.get('nct_id')} rejected: {reason}")
+
+        self.stats.inc_value("validate/accepted")
+        return item

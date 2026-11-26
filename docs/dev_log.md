@@ -108,3 +108,36 @@ Written while building, so I can explain every decision. Newest step at the bott
 - **Why separate Normalize from Validate?** Single responsibility. Normalize *transforms* and never drops; Validate *judges*. That means every rejection happens in one place, with one reason format, and gets logged to the `rejected` table.
 - **Why deep-copy before redacting?** `redact_people` must not change the original dict other code may still use. `copy.deepcopy` makes it side-effect free.
 - **Why `.get(..., {})` chains everywhere?** Any module or key can be missing in real data. Chained `.get` with defaults means a missing piece becomes `None` instead of a `KeyError` crash, and Validate then decides whether `None` is acceptable.
+
+---
+
+## Step 4.2: ValidatePipeline
+
+### What we did
+- `StudyRecord` (pydantic model) encodes the rules from CLAUDE.md:
+  - `nct_id` matches `^NCT\d{8}$`
+  - `title` is a non-empty string
+  - `enrollment` is >= 0 or None
+  - `start_date` is a real `YYYY-MM-DD` date between 1990-01-01 and today + ~10 years, or None
+- `ValidatePipeline` builds the model from each normalized item. On failure it inserts
+  `(nct_id, reason, raw_json, rejected_at)` into `rejected`, increments `validate/rejected`, and raises `DropItem`.
+  On success it increments `validate/accepted` and passes the item on.
+- Unit-tested on 11 cases (4 valid: 2 real studies, missing enrollment, missing start date; 7 invalid: bad ID,
+  empty title, negative enrollment, garbage date, 1985, 2050, two errors at once). The stats and `rejected` rows matched exactly.
+- Real 2-page crawl: **2000 seen, 2000 accepted, 0 rejected.**
+
+### Problems and fixes
+| Problem | Cause | Fix |
+|---|---|---|
+| Validate must write to the DB, but the store pipeline doesn't exist yet | Rejections must be persisted, not just logged | Validate opens its own SQLite connection (`open_spider`/`close_spider`). It's independent of the store pipeline, so it can be tested alone |
+| Re-running the crawl would pile up old rejections (the `rejected` table has no key) | Every run re-inserts the same failures | `DELETE FROM rejected` at the start of each run: the table describes the **latest run**, so its row count equals `validate/rejected` in the stats |
+| pydantic's raw error is a long multi-line block | Its default `str(error)` is meant for developers | `short_reason()` flattens it into one line per field, `field: message; field: message`, which is easy to GROUP BY for "top rejection reasons" |
+| An empty title reports "Input should be a valid string" rather than "too short" | Normalize turns `"   "` into `None` before Validate sees it | Accepted. The reason still names the field (`title`), and the behaviour is correct |
+| 0 rejections on 2000 real studies: is validation even working? | The registry already enforces most of these rules on submission | The synthetic tests prove each rule fires. Zero real rejections is a finding, not a bug, and it goes in the README as such |
+
+### Interview talking points
+- **Why pydantic instead of if-statements?** The rules are declared in one readable class. pydantic collects *all* failures (not just the first) with the field name and message, and it's the standard tool for this in Python. It has nothing to do with FastAPI; FastAPI just uses it internally.
+- **Why not drop invalid records silently?** You can't fix or even notice data problems you've thrown away. The `rejected` table keeps the reason and the (redacted) raw record, so every drop is auditable.
+- **What is `from_crawler`?** Scrapy's hook for building a component. It hands us `crawler.settings` (for `SQLITE_PATH`) and `crawler.stats` (for counters), instead of the pipeline using globals.
+- **What do the stats prove?** At the end: `api/studies_seen` = `validate/accepted` + `validate/rejected`, and after the dedupe step, accepted = stored + duplicates. Every record is accounted for.
+- **Why does Validate check `enrollment >= 0` and not more?** Only rules we can justify go in. A study with 0 participants exists (withdrawn studies), so `>= 0`, not `> 0`.

@@ -40,4 +40,5 @@ FEED_EXPORT_ENCODING = "utf-8"
 # --- Item pipelines: lower number runs first ---
 ITEM_PIPELINES = {
     "ctgov_pk.pipelines.NormalizePipeline": 100,
+    "ctgov_pk.pipelines.ValidatePipeline": 200,
 }
